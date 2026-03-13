@@ -1,0 +1,110 @@
+import json
+import time
+import uuid
+from typing import AsyncGenerator
+
+from openai import AsyncOpenAI
+
+from app.api.schemas import ChatCompletionRequest
+from app.core.config import settings
+
+
+class LLMService:
+    def __init__(self) -> None:
+        if not settings.supports_openai_compatible:
+            raise ValueError(
+                f"Unsupported LLM_PROVIDER: {settings.llm_provider}. "
+                "Only 'openai_compatible' is supported now."
+            )
+        self.client = AsyncOpenAI(
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
+        )
+
+    def resolve_model(self, requested_model: str | None) -> str:
+        if requested_model and requested_model != "agent-core-v1":
+            return requested_model
+        return settings.llm_model
+
+    def build_chunk_payload(
+        self,
+        *,
+        chunk_id: str,
+        created: int,
+        model_name: str,
+        delta: dict,
+        finish_reason: str | None,
+    ) -> str:
+        payload = {
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model_name,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": delta,
+                    "finish_reason": finish_reason,
+                }
+            ],
+        }
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    async def stream_chat(
+        self, request: ChatCompletionRequest
+    ) -> AsyncGenerator[str, None]:
+        chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
+        created = int(time.time())
+        role_sent = False
+        model_name = self.resolve_model(request.model)
+
+        try:
+            stream = await self.client.chat.completions.create(
+                model=model_name,
+                messages=[message.model_dump() for message in request.messages],
+                temperature=request.temperature,
+                stream=True,
+            )
+
+            async for chunk in stream:
+                choice = chunk.choices[0] if chunk.choices else None
+                if choice is None:
+                    continue
+
+                delta = {}
+                if not role_sent:
+                    delta["role"] = "assistant"
+                    role_sent = True
+
+                content = getattr(choice.delta, "content", None)
+                if content:
+                    delta["content"] = content
+
+                yield self.build_chunk_payload(
+                    chunk_id=chunk_id,
+                    created=created,
+                    model_name=model_name,
+                    delta=delta,
+                    finish_reason=choice.finish_reason,
+                )
+
+            yield self.build_chunk_payload(
+                chunk_id=chunk_id,
+                created=created,
+                model_name=model_name,
+                delta={},
+                finish_reason="stop",
+            )
+        except Exception as exc:
+            yield self.build_chunk_payload(
+                chunk_id=chunk_id,
+                created=created,
+                model_name=model_name,
+                delta={"content": f"\n\n[服务器拦截报错] {str(exc)}"},
+                finish_reason="stop",
+            )
+
+        yield "data: [DONE]\n\n"
+
+
+llm_service = LLMService()

@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 
 # ==========================================
 # 1. 基础消息结构 (严格对齐 OpenAI)
@@ -12,7 +12,10 @@ class ChatMessage(BaseModel):
 # 2. 接收请求的模型 (客户端 -> Python服务)
 # ==========================================
 class ChatCompletionRequest(BaseModel):
-    model: str = Field(default="agent-core-v1", description="请求调用的模型名称")
+    model: str = Field(
+        default="agent-core-v1",
+        description="请求调用的模型名称；传 agent-core-v1 时会回退到服务端默认模型",
+    )
     messages: List[ChatMessage] = Field(..., description="历史对话列表，最后一项为当前问题")
     stream: Optional[bool] = Field(default=False, description="是否使用 SSE 流式输出")
     temperature: Optional[float] = Field(default=0.7, ge=0.0, le=2.0, description="大模型的发散度")
